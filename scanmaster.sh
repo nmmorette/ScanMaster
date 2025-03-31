@@ -108,7 +108,7 @@ echo "-----------------------------------------------------------"
 
 
 # Verificar se os sites ativos contêm termos de ataque
-attack_terms=("dev" "test" "jira" "public" "hml" "jenkins" "\.ci\." "tools" "gitlab" "git" "it" "support" "login" "admin" "register" "login" "beta" "sql" "db" "admin" "vpn" "test" "sandbox" "dev2")
+attack_terms=("dev" "test" "jira" "public" "hml" "jenkins" "\.ci\." "tools" "gitlab" "git" "it" "support" "login" "admin" "register" "login" "beta" "sql" "db" "admin" "vpn" "test" "sandbox" "dev2" "demo")
 attack_domains=()
 for site in $httprobe_output; do
     for term in "${attack_terms[@]}"; do
