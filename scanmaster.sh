@@ -54,8 +54,8 @@ check_dependency() {
 }
 
 # Verificar e instalar dependências
-dependencies=("subfinder" "assetfinder" "httprobe" "jq" "ffuf" "seclists")
-package_manager="apt-get"  # Defina o gerenciador de pacotes padrão aqui
+dependencies=("subfinder" "assetfinder" "httprobe" "jq" "ffuf" "gowitness")
+package_manager="apt-get"  # Altere conforme sua distro
 for dep in "${dependencies[@]}"; do
     check_dependency "$dep" "$package_manager"
 done
@@ -66,49 +66,47 @@ if [ -z "$1" ]; then
     exit 1
 fi
 
-# Definir o domínio a ser pesquisado
 domain="$1"
 
-# Exibir mensagem de busca por subdomínios
+# Criar diretório de resultados
+timestamp=$(date +%Y%m%d_%H%M%S)
+output_dir="resultados/${domain}_${timestamp}"
+mkdir -p "$output_dir"
+
+# Caminhos de saída
+subdomains_file="$output_dir/subdomains.txt"
+active_file="$output_dir/active_sites.txt"
+juicy_file="$output_dir/juicytargets.txt"
+gowitness_targets="$output_dir/targets.txt"
+
 print_status "Buscando Subdomínios para $domain..."
 echo "-----------------------------------------------------------"
 
-# Execute o subfinder para encontrar subdomínios
 subfinder_output=$(subfinder -d "$domain" 2>/dev/null | grep -v '@')
-
-# Execute o assetfinder para encontrar mais subdomínios
 assetfinder_output=$(assetfinder --subs-only "$domain" 2>/dev/null | grep -v '@')
+crtsh_output=$(curl -s "https://crt.sh/?q=%25.$domain&output=json" | jq -r '.[].name_value' | sed 's/\*\.//g' | sort -u)
+ffuf_output=$(ffuf -u "http://FUZZ.$domain" -w /usr/share/wordlists/dirb/big.txt -mc 200 -o json 2>/dev/null)
 
-# Execute o ffuf para encontrar subdomínios adicionais
-ffuf_output=$(ffuf -u "http://FUZZ.$domain" -w /usr/share/wordlists/seclists/Discovery/DNS/subdomains-top1million-5000.txt -mc 200 -o json 2>/dev/null)
+all_subdomains=$(echo -e "$subfinder_output\n$assetfinder_output\n$crtsh_output\n$ffuf_output" | sort -u)
+echo "$all_subdomains" > "$subdomains_file"
 
-# Combine todos os subdomínios encontrados
-all_subdomains=$(echo -e "$subfinder_output\n$assetfinder_output\n$ffuf_output" | sort -u)
-
-# Salvar subdomínios em um arquivo
-echo "$all_subdomains" > subdomains.txt
-
-# Imprimir os sites encontrados em ciano
 print_status "Sites Encontrados: ($(echo "$all_subdomains" | wc -l))"
 echo "-----------------------------------------------------------"
 echo "$all_subdomains"
 echo "-----------------------------------------------------------"
 
-# Execute o httprobe para verificar quais sites estão ativos
-httprobe_output=$(httprobe -prefer-https < subdomains.txt)
+# Verificar sites ativos
+httprobe_output=$(httprobe < "$subdomains_file")
+echo "$httprobe_output" > "$active_file"
 
-# Salvar sites ativos em um arquivo
-echo "$httprobe_output" > active_sites.txt
-
-# Exibir os sites ativos na tela em ciano
 print_status "Sites Ativos: ($(echo "$httprobe_output" | wc -l))"
 echo "-----------------------------------------------------------"
 echo "$httprobe_output"
 echo "-----------------------------------------------------------"
 
-
-# Verificar se os sites ativos contêm termos de ataque
-attack_terms=("dev" "test" "jira" "public" "hml" "jenkins" "\.ci\." "tools" "gitlab" "git" "it" "support" "login" "admin" "register" "login" "beta" "sql" "db" "admin" "vpn" "test" "sandbox" "dev2" "demo")
+# Buscar Juicy Targets
+attack_terms=("dev" "dev1" "dev2" "dev3" "development" "test" "testing" "qa" "staging" "hml" "sandbox" "demo" "preview" "beta" "alpha" "preprod" "uat" "jenkins" "git" "gitlab" "bitbucket" "ci" "cicd" "pipeline" "artifactory" "nexus" "registry" "docker" "harbor" "login" "signin" "auth" "authentication" "sso" "saml" "oauth" "register" "signup" "password" "reset" "forgot" "token" "vpn" "remote" "access" "gateway" "firewall" "admin" "adminpanel" "manage" "dashboard" "console" "cms" "intranet" "internal" "private" "secure" "portal" "support" "help" "helpdesk" "it" "ticket" "jira" "confluence" "servicenow" "db" "database" "mysql" "postgres" "mongo" "sql" "redis" "api" "backend" "tools" "monitoring" "status" "uptime" "metrics" "grafana" "prometheus" "logs" "log" "kibana" "elastic" "public" "static" "files" "uploads" "content" "assets" "media" "old" "backup" "bak" "temp" "tmp" "archive"
+)
 attack_domains=()
 for site in $httprobe_output; do
     for term in "${attack_terms[@]}"; do
@@ -119,22 +117,47 @@ for site in $httprobe_output; do
     done
 done
 
-# Salvar os domínios de ataque em um arquivo e imprimir na tela
 if [ ${#attack_domains[@]} -gt 0 ]; then
     print_status "Buscando Juicy Targets..."
     echo "-----------------------------------------------------------"
-    for domain in "${attack_domains[@]}"; do
-        print_juicy_target "$domain"
-    done | tee juicytargets.txt
+    for juicy in "${attack_domains[@]}"; do
+        print_juicy_target "$juicy"
+    done | tee "$juicy_file"
 else
     print_status "Nenhum Juicy Target encontrado."
 fi
 
+# Captura de screenshots com gowitness
+echo "$httprobe_output" > "$gowitness_targets"
 
-# Resumo
+rm -f gowitness.sqlite3
+gowitness init
+
+print_status "Capturando screenshots com gowitness (modo com banco de dados)..."
+while read -r url; do
+    gowitness scan single --url "$url" --write-db
+done < "$gowitness_targets"
+
+print_status "Capturas salvas no diretório: $gowitness_dir"
+echo "Para visualizar com interface web, use: gowitness server"
+
+# Comparação com scan anterior
+last_file=$(ls -1 resultados | grep "$domain" | grep -v "$timestamp" | sort | tail -n 1)
+
+if [ -n "$last_file" ]; then
+    last_subs="resultados/$last_file/subdomains.txt"
+    if [ -f "$last_subs" ]; then
+        new_count=$(comm -13 <(sort "$last_subs") <(sort "$subdomains_file") | wc -l)
+        print_status "Novos subdomínios desde o último scan: $new_count"
+    fi
+else
+    print_status "Nenhum scan anterior encontrado para comparação."
+fi
+
+# Resumo final
 echo "-----------------------------------------------------------"
 print_summary "Resumo dos Findings"
 echo "-----------------------------------------------------------"
-echo "Sites Encontrados (subdomains.txt): $(echo "$all_subdomains" | wc -l)"
-echo "Sites Ativos (active_sites.txt): $(echo "$httprobe_output" | wc -l)"
-echo "JuicyTargets (juicytargets.txt): ${#attack_domains[@]}"
+echo "Sites Encontrados ($subdomains_file): $(echo "$all_subdomains" | wc -l)"
+echo "Sites Ativos ($active_file): $(echo "$httprobe_output" | wc -l)"
+echo "JuicyTargets ($juicy_file): ${#attack_domains[@]}"
